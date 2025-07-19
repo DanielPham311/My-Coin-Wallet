@@ -27,3 +27,11 @@ Edit
 cd backend
 pip install -r requirements.txt
 python app.py
+```
+
+### Frontend (Flutter)
+```bash
+cd frontend
+flutter pub get
+flutter run
+```
