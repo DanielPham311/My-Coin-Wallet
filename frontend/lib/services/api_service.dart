@@ -15,15 +15,27 @@ class ApiService {
     return json.decode(response.body);
   }
 
-  Future<void> sendTransaction(String sender, String receiver, int amount) async {
-    await http.post(
-      Uri.parse('$baseUrl/transaction'),
-      headers: {"Content-Type": "application/json"},
-      body: json.encode({"sender": sender, "receiver": receiver, "amount": amount}),
-    );
-  }
-
   Future<void> mineBlock() async {
     await http.get(Uri.parse('$baseUrl/mine'));
   }
+
+  Future<Map<String, dynamic>> sendTransaction({
+  required String sender,
+  required String recipient,
+  required int amount,
+  required String privateKey,
+}) async {
+  final response = await http.post(
+    Uri.parse('$baseUrl/transaction/send'),
+    headers: {'Content-Type': 'application/json'},
+    body: json.encode({
+      "sender": sender,
+      "recipient": recipient,
+      "amount": amount,
+      "privateKey": privateKey,
+    }),
+  );
+  return json.decode(response.body);
+}
+
 }
