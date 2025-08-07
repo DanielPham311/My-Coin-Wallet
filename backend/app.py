@@ -11,34 +11,62 @@ blockchain = Blockchain()
 @app.route('/wallet/create', methods=['POST'])
 def wallet_create():
     private_key, address = create_wallet()
-    return jsonify({"private_key": private_key, "address": address})
+
+    # Mint 100 coins
+    blockchain.mint(address, 100)
+
+    # Confirm minting by mining the block
+    blockchain.create_block(previous_hash=blockchain.chain[-1]['hash'])
+
+    balance = blockchain.get_balance(address)
+    return jsonify({
+        "private_key": private_key,
+        "address": address,
+        "balance": balance
+    })
+
 
 @app.route('/wallet/<address>', methods=['GET'])
 def get_balance(address):
     balance = blockchain.get_balance(address)
     return jsonify({"address": address, "balance": balance})
 
-@app.route('/transaction', methods=['POST'])
-def create_transaction():
+
+@app.route('/transaction/send', methods=['POST'])
+def send_transaction():
     data = request.json
-    blockchain.add_transaction(data['sender'], data['receiver'], data['amount'])
-    return jsonify({"message": "Transaction added"})
+    sender = data.get('sender')
+    recipient = data.get('recipient')
+    amount = data.get('amount')
+    private_key = data.get('privateKey')
+
+    if not all([sender, recipient, amount, private_key]):
+        return jsonify({"error": "Missing required fields"}), 400
+
+    try:
+        tx = blockchain.create_transaction(sender, recipient, amount)
+        return jsonify({"message": "Transaction submitted", "transaction": tx}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
 
 @app.route('/mine', methods=['GET'])
 def mine_block():
-    last_block = blockchain.chain[-1]
-    new_block = {'index': len(blockchain.chain) + 1,
-                 'timestamp': last_block['timestamp'],
-                 'transactions': blockchain.mempool,
-                 'previous_hash': last_block['hash'],
-                 'nonce': 0}
-    mined_block = blockchain.proof_of_work(new_block)
-    blockchain.chain.append(mined_block)
-    return jsonify({"message": "Block mined", "block": mined_block})
+    previous_hash = blockchain.chain[-1]['hash']
+    new_block = blockchain.create_block(previous_hash)
+    return jsonify({"message": "Block mined", "block": new_block})
+
 
 @app.route('/chain', methods=['GET'])
 def get_chain():
     return jsonify(blockchain.chain)
+
+
+@app.route('/transactions/<address>', methods=['GET'])
+def get_transactions(address):
+    history = blockchain.get_transaction_history(address)
+    return jsonify({"address": address, "transactions": history})
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
