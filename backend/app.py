@@ -1,144 +1,94 @@
 from flask import Flask, request, jsonify
-from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
-from werkzeug.security import generate_password_hash, check_password_hash
-import jwt
+from flask_bcrypt import Bcrypt
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from blockchain import Blockchain
 import datetime
 
-from blockchain import Blockchain
-from wallet import create_wallet
-
-# -------------------- Flask Setup --------------------
 app = Flask(__name__)
-CORS(app)
 
-# Secret key for JWT
-app.config['SECRET_KEY'] = "super-secret-key"
-
-# SQLite DB (swap to postgres/mysql later if needed)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///blockchain.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
+# Config
+app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///users.db"
+app.config["JWT_SECRET_KEY"] = "super-secret"  # change this in production
 db = SQLAlchemy(app)
+bcrypt = Bcrypt(app)
+jwt = JWTManager(app)
 
-# -------------------- Database Models --------------------
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    password = db.Column(db.String(200), nullable=False)
-    address = db.Column(db.String(200), unique=True, nullable=False)
-    private_key = db.Column(db.String(200), nullable=False)
-
-# -------------------- Blockchain Instance --------------------
 blockchain = Blockchain()
 
-# -------------------- Auth Routes --------------------
-@app.route('/register', methods=['POST'])
+# User model
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(100), unique=True, nullable=False)
+    password = db.Column(db.String(200), nullable=False)
+
+# =====================
+# Auth Endpoints
+# =====================
+@app.route("/register", methods=["POST"])
 def register():
-    data = request.json
-    username = data.get("username")
-    password = data.get("password")
-
-    if not username or not password:
-        return jsonify({"error": "Missing username or password"}), 400
-
-    # Create wallet
-    private_key, address = create_wallet()
-
-    # Hash password
-    hashed_pw = generate_password_hash(password)
-
-    # Save user
-    new_user = User(username=username, password=hashed_pw, address=address, private_key=private_key)
+    data = request.get_json()
+    hashed_pw = bcrypt.generate_password_hash(data["password"]).decode("utf-8")
+    new_user = User(username=data["username"], password=hashed_pw)
     db.session.add(new_user)
     db.session.commit()
+    return jsonify({"message": "User registered successfully!"}), 201
 
-    # Mint some starting balance
-    blockchain.mint(address, 100)
-    blockchain.create_block(previous_hash=blockchain.chain[-1]['hash'])
-
-    return jsonify({
-        "message": "User registered successfully",
-        "username": username,
-        "address": address,
-        "private_key": private_key
-    }), 201
-
-
-@app.route('/login', methods=['POST'])
+@app.route("/login", methods=["POST"])
 def login():
-    data = request.json
-    username = data.get("username")
-    password = data.get("password")
+    data = request.get_json()
+    user = User.query.filter_by(username=data["username"]).first()
+    if user and bcrypt.check_password_hash(user.password, data["password"]):
+        token = create_access_token(identity=user.username, expires_delta=datetime.timedelta(hours=1))
+        return jsonify({"token": token, "username": user.username}), 200
+    return jsonify({"message": "Invalid credentials"}), 401
 
-    user = User.query.filter_by(username=username).first()
-    if not user or not check_password_hash(user.password, password):
-        return jsonify({"error": "Invalid credentials"}), 401
+# =====================
+# Blockchain Endpoints
+# =====================
+@app.route("/balance", methods=["GET"])
+@jwt_required()
+def get_balance():
+    current_user = get_jwt_identity()
+    balance = blockchain.get_balance(current_user)
+    return jsonify({"balance": balance}), 200
 
-    token = jwt.encode(
-        {"user_id": user.id, "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)},
-        app.config['SECRET_KEY'],
-        algorithm="HS256"
-    )
+@app.route("/transactions", methods=["GET"])
+@jwt_required()
+def get_transactions():
+    current_user = get_jwt_identity()
+    txs = blockchain.get_user_transactions(current_user)
+    return jsonify({"transactions": txs}), 200
 
-    return jsonify({"token": token, "address": user.address})
-
-
-# -------------------- Wallet Routes --------------------
-@app.route('/wallet/<address>', methods=['GET'])
-def get_balance(address):
-    balance = blockchain.get_balance(address)
-    return jsonify({"address": address, "balance": balance})
-
-
-# -------------------- Transaction Routes --------------------
-@app.route('/transaction/send', methods=['POST'])
+@app.route("/transaction/send", methods=["POST"])
+@jwt_required()
 def send_transaction():
-    data = request.json
-    sender = data.get('sender')
-    recipient = data.get('recipient')
-    amount = data.get('amount')
+    current_user = get_jwt_identity()
+    data = request.get_json()
+    receiver = data.get("receiver")
+    amount = data.get("amount")
 
-    if not all([sender, recipient, amount]):
-        return jsonify({"error": "Missing required fields"}), 400
+    if not receiver or not amount:
+        return jsonify({"message": "Missing receiver or amount"}), 400
 
-    try:
-        tx = blockchain.create_transaction(sender, recipient, amount)
-        return jsonify({"message": "Transaction submitted", "transaction": tx}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+    tx = blockchain.add_transaction(sender=current_user, receiver=receiver, amount=amount)
+    return jsonify({"message": "Transaction added", "transaction": tx}), 201
 
+@app.route("/mint", methods=["POST"])
+@jwt_required()
+def mint():
+    current_user = get_jwt_identity()
+    data = request.get_json()
+    amount = data.get("amount")
 
-@app.route('/transactions/<address>', methods=['GET'])
-def get_transactions(address):
-    txs = blockchain.get_transactions(address)
-    return jsonify({"transactions": txs})
+    if not amount:
+        return jsonify({"message": "Missing amount"}), 400
 
+    tx = blockchain.add_transaction(sender="SYSTEM", receiver=current_user, amount=amount)
+    return jsonify({"message": f"{amount} coins minted", "transaction": tx}), 201
 
-# -------------------- Blockchain Routes --------------------
-@app.route('/mine', methods=['GET'])
-def mine_block():
-    previous_hash = blockchain.chain[-1]['hash']
-    new_block = blockchain.create_block(previous_hash)
-    return jsonify({"message": "Block mined", "block": new_block})
-
-
-@app.route('/chain', methods=['GET'])
-def get_chain():
-    return jsonify(blockchain.chain)
-
-
-@app.route('/chain/validate', methods=['GET'])
-def validate_chain():
-    is_valid = blockchain.is_chain_valid()
-    if is_valid:
-        return jsonify({"message": "Blockchain is valid ✅"}), 200
-    else:
-        return jsonify({"message": "Blockchain is invalid ❌"}), 400
-
-
-# -------------------- Run --------------------
-if __name__ == '__main__':
+# =====================
+if __name__ == "__main__":
     with app.app_context():
-        db.create_all()   # Creates tables on first run
-    app.run(debug=True, port=5000)
+        db.create_all()
+    app.run(debug=True)
